@@ -1,5 +1,15 @@
 ---
-- name: Detener servicios
+- name: Ver permisos sudo del usuario
+  ansible.builtin.command: sudo -l
+  register: permisos_sudo
+  failed_when: false
+  changed_when: false
+
+- name: Mostrar permisos sudo
+  ansible.builtin.debug:
+    var: permisos_sudo.stdout_lines
+
+- name: Intentar detener servicios y capturar error real
   ansible.builtin.shell: 'pkill -9 -f "[{{ item[0] }}]{{ item[1:] }}"'
   become: true
   register: resultado_pkill
@@ -7,20 +17,9 @@
   changed_when: true
   loop: "{{ nombre_proceso }}"
 
-- name: Validar estado de cada servicio
-  ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "[{{ item[0] }}]{{ item[1:] }}"'
-  register: estado_servicios
-  failed_when: false
-  changed_when: false
-  loop: "{{ nombre_proceso }}"
-  loop_control:
-    label: "{{ item }}"
-
-- name: Mostrar resultados
+- name: Mostrar salida exacta de pkill
   ansible.builtin.debug:
-    msg: >-
-      El servicio "{{ item.item }}" {{
-        'está DETENIDO ✅' if (item.stdout | trim == '') else
-        'sigue ACTIVO ❌'
-      }}
-  loop: "{{ estado_servicios.results }}"
+    msg: "RC: {{ item.rc }} | STDOUT: {{ item.stdout }} | STDERR: {{ item.stderr }}"
+  loop: "{{ resultado_pkill.results }}"
+  loop_control:
+    label: "{{ item.item }}"
