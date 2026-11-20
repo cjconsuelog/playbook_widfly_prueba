@@ -1,0 +1,54 @@
+---
+- name: Revisar si ya esta activo el proceso "{{ levanta_servicio_nombre_proceso }}"
+  ansible.builtin.shell: |
+    set -o pipefail
+    pgrep -f "{{ levanta_servicio_nombre_proceso }}"
+  register: proceso_inicial
+  failed_when: false
+  changed_when: false
+
+- name: Elimina directorios antes de levantar (solo si no está activo)
+  ansible.builtin.file:
+    path: "{{ levanta_servicio_ruta_origen }}{{ item_2 }}"
+    state: absent
+  with_items:
+    - "data"
+    - "tmp"
+    - "log"
+  loop_control:
+    loop_var: item_2
+  when: proceso_inicial.rc != 0
+
+- name: Levanta servicio (solo si no está activo)
+  ansible.builtin.shell: "{{ item_3 }}"
+  failed_when: false
+  changed_when: true
+  with_items: "{{ levanta_servicio_nombre_script }}"
+  loop_control:
+    loop_var: item_3
+  async: 5
+  poll: 2
+  when: proceso_inicial.rc != 0
+
+- name: Esperar a que se encuentre arriba el proceso "{{ levanta_servicio_nombre_proceso }}"
+  ansible.builtin.shell: |
+    set -o pipefail
+    pgrep -f "{{ levanta_servicio_nombre_proceso }}"
+  register: proceso_final
+  retries: 10
+  delay: 5
+  until: proceso_final.rc == 0
+  failed_when: false
+  changed_when: false
+  when: proceso_inicial.rc != 0
+
+- name: Mensaje de resultado
+  ansible.builtin.debug:
+    msg: |
+      {% if proceso_inicial.rc == 0 %}
+      ⚠️ El proceso "{{ levanta_servicio_nombre_proceso }}" ya estaba activo (PID: {{ proceso_inicial.stdout }}).
+      {% elif proceso_final.rc == 0 %}
+      ✅ El proceso "{{ levanta_servicio_nombre_proceso }}" se levantó correctamente (PID: {{ proceso_final.stdout }}).
+      {% else %}
+      ❌ No se pudo levantar el proceso "{{ levanta_servicio_nombre_proceso }}".
+      {% endif %}

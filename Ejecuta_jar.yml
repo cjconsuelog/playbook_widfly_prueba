@@ -1,0 +1,58 @@
+---
+- name: Validar ejecucion de jar validaBC3.jar
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Crear archivo validaBC3.properties desde plantilla
+      ansible.builtin.template:
+        src: validaBC3.properties.j2
+        dest: /home/validaBC3.properties
+        mode: '0644'
+
+    - name: Ejecutar JAR
+      ansible.builtin.shell: set -o pipefail echo -e "2\n1" | java -jar /home/validaBC3_ultimo.jar > /home/salida_jar.txt
+      args:
+        chdir: /home
+      changed_when: true
+
+
+    - name: Validar que "Se ejecuta Close correctamente"
+      block:
+        - name: Validar mensaje de ejecucion del jar correcta
+          ansible.builtin.command: grep "Se ejecuta Close correctamente" /home/salida_jar.txt
+          register: resultado_jar
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Validar mensaje
+          ansible.builtin.debug:
+            msg: "✅ Se encontro la cadena {{ resultado_jar.stdout }}"
+          when: resultado_jar.stdout | length > 0
+
+        - name: Validar mensaje
+          ansible.builtin.debug:
+            msg: "❌ No se encontró la cadena 'Se ejecuta Close correctamente'"
+          when: resultado_jar.stdout | length == 0
+
+
+    - name: Buscar la "Version de BC3:"
+      block:
+        - name: Validar mensaje de version de jar
+          ansible.builtin.command: grep "Version de BC3" /home/salida_jar.txt
+          register: resultado
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Validar mensaje
+          ansible.builtin.debug:
+            msg: "✅ {{ resultado.stdout }}"
+          when: resultado.stdout | length > 0
+
+        - name: Validar mensaje
+          ansible.builtin.debug:
+            msg: "❌ No se encontró ninguna línea que contenga 'Version de BC3:'"
+          when: resultado.stdout | length == 0
+

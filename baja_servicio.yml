@@ -1,0 +1,6 @@
+- name: Detener servicios {{ nombre_servicio }}
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - baja_servicio  

@@ -1,0 +1,23 @@
+---
+# tasks file for reverso_respaldo
+- name: Eliminar directorio existente {{ dir_original }}
+  ansible.builtin.file:
+    path: "{{ ruta_dir_del }}{{ dir_original }}"
+    state: absent
+
+- name: Regresar a Respaldo {{ nombre_respaldo }}
+  copy:
+    src: "{{ ruta_origen }}{{ nombre_respaldo }}/"
+    dest: "{{ ruta_destino }}"
+    mode: preserve  
+    directory_mode: yes
+    remote_src: yes
+
+- name: Validar que se creo el respaldo {{ nombre_respaldo }}
+  command: "{{ comando }}"
+  register: command_result
+
+- name: Guarda salida
+  debug:
+    msg: "{{ command_result.stdout_lines }}"
+

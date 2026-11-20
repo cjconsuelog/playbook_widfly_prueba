@@ -1,0 +1,78 @@
+---
+- name: Prueba de conexion a CyberArk CCP usando variables del Template
+  hosts: localhost
+  gather_facts: false
+  vars:
+    safe: "POS_CCP_PWD"
+    object_name: "172.16.216.201-root"
+
+  tasks:
+    - name: Recuperar password desde CyberArk CCP
+      set_fact:
+        cyberark_password: "{{ lookup('cyberark_credential', {
+          'api_base_url': ansible_cyberark_ccp_url,
+          'app_id': ansible_cyberark_app_id,
+          'safe': safe,
+          'object': object_name,
+          'validate_certs': false
+        }) }}"
+
+    - name: Mostrar el password recuperado (Solo para validar)
+      debug:
+        msg: "El password recuperado es: {{ cyberark_password }}"
+        
+
+- name: Prueba de conexión y diagnóstico básico
+  hosts: all
+  gather_facts: true
+  vars:
+    # Le indicamos a SSH que use la contraseña recuperada en localhost
+    ansible_password: "{{ hostvars['localhost']['cyberark_password'] }}"
+    
+    # Si el usuario SSH no es 'root', descomenta y cambia la siguiente línea:
+    # ansible_user: "tu_usuario"
+
+  tasks:
+    - name: Probar conectividad con el servidor
+      ansible.builtin.ping:
+
+    - name: Mostrar información básica del servidor
+      ansible.builtin.debug:
+        msg:
+          - "¡Conexión exitosa!"
+          - "Hostname: {{ ansible_facts['hostname'] }}"
+          - "Sistema Operativo: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "IP Principal: {{ ansible_facts['default_ipv4']['address'] | default('No detectada') }}"
+          
+# --- NUEVAS TAREAS ---
+
+    # 1. VERIFICAR ESPACIO EN DISCO
+    - name: Obtener uso de disco de la partición raíz (/)
+      ansible.builtin.shell: df -h / | awk 'NR==2 {print $5}'
+      register: disk_usage
+      changed_when: false
+
+    - name: Mostrar porcentaje de uso de disco
+      ansible.builtin.debug:
+        msg: "Uso actual del disco raíz (/): {{ disk_usage.stdout }}"
+
+    # 2. VERIFICAR SERVICIOS CRÍTICOS
+    - name: Recolectar información de los servicios del sistema
+      ansible.builtin.service_facts:
+
+    - name: Validar estado de servicios esenciales
+      ansible.builtin.debug:
+        msg: 
+          - "Servicio SSH: {{ ansible_facts.services['sshd.service'].state | default('No encontrado') }}"
+          # Descomenta y cambia el nombre por los servicios que uses (ej. nginx, mysql, pos-app)
+          # - "Base de Datos: {{ ansible_facts.services['mysql.service'].state | default('No encontrado') }}"
+
+    # 3. SINCRONIZACIÓN DE HORA (NTP/Chrony)
+    - name: Comprobar que el servicio de hora está corriendo (chronyd o systemd-timesyncd)
+      ansible.builtin.assert:
+        that:
+          - (ansible_facts.services['chronyd.service'] is defined and ansible_facts.services['chronyd.service'].state == 'running') or 
+            (ansible_facts.services['systemd-timesyncd.service'] is defined and ansible_facts.services['systemd-timesyncd.service'].state == 'running')
+        success_msg: "La sincronización de hora está ACTIVA (Crítico para pagos)."
+        fail_msg: "ADVERTENCIA: No se detectó el servicio de hora corriendo."
+      ignore_errors: yes # Evita que el playbook se detenga por completo si falla

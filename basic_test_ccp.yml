@@ -1,0 +1,69 @@
+---
+- name: Recuperar credenciales desde CyberArk CCP y procesar IPs
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_cyberark_ccp_url: "https://ccp-seg.liverpool.com.mx"
+    ansible_cyberark_app_id: "POS"
+    mapeo_safes:
+      "172.16.12.233": "12_ROOT_APPV_172_16_12_233"
+      "172.16.11.233": "QRO_ROOT_APPV_172_16_11_233"
+      "172.16.16.233": "QRO_ROOT_APPV_172_16_16_233"
+
+  tasks:
+      - name: Parsear la variable del Survey a una lista de IPs
+        ansible.builtin.set_fact:
+          lista_ips: "{{ (survey_ips | default('172.16.12.233')).splitlines() | map('trim') | select() | list }}"
+  
+      - name: Visualizar parámetros a enviar a CyberArk
+        ansible.builtin.debug:
+          msg: "Buscando en Safe: '{{ mapeo_safes[item] }}' el objeto: '{{ item }}-root'"
+        loop: "{{ lista_ips }}"
+  
+      - name: Recuperar passwords de CyberArk y agregar hosts dinámicamente
+        ansible.builtin.add_host:
+          name: "{{ item }}"
+          groups: servidores_dinamicos
+          ansible_user: "root"
+          ansible_password: >-
+            {{ lookup('cyberark_credential', {
+              'api_base_url': ansible_cyberark_ccp_url,
+              'app_id': ansible_cyberark_app_id,
+              'safe': mapeo_safes[item], 
+              'object': item ~ '-root', 
+              'validate_certs': false
+            }) }}
+        loop: "{{ lista_ips }}"
+        no_log: true
+
+- name: Pruebas de administración y diagnóstico en el servidor objetivo
+  hosts: servidores_dinamicos
+  gather_facts: true
+
+  tasks:
+    - name: Verificar permisos de sudo/root
+      ansible.builtin.command: id
+      become: true
+      register: resultado_id
+
+    - name: Obtener estado de particiones montadas
+      ansible.builtin.set_fact:
+        espacio_discos: "{{ ansible_facts['mounts'] | map(attribute='mount') | list }}"
+
+    #new
+    - name: Obtener información de todos los grupos del sistema
+      ansible.builtin.getent:
+        database: group    
+
+    - name: Reporte de diagnóstico del servidor
+      ansible.builtin.debug:
+        msg:
+          - "=== REPORTE DE EJECUCIÓN AAP ==="
+          - "Servidor: {{ ansible_facts['fqdn'] | default('Desconocido') }} ({{ ansible_facts['default_ipv4']['address'] | default(inventory_hostname) }})"
+          - "SO: {{ ansible_facts['distribution'] | default('Desconocido') }} {{ ansible_facts['distribution_version'] | default('') }}"
+          - "Uptime: {{ (ansible_facts['uptime_seconds'] / 3600) | round(2) if 'uptime_seconds' in ansible_facts else 'N/A' }} horas"
+          - "RAM Libre: {{ ansible_facts['memfree_mb'] | default('N/A') }} MB / {{ ansible_facts['memtotal_mb'] | default('N/A') }} MB"
+          - "Usuario ejecutante con sudo: {{ resultado_id.stdout }}"
+          - "Puntos de montaje detectados: {{ espacio_discos }}"
+          - "Total de grupos en el sistema: {{ ansible_facts.getent_group | length }}"
+          - "Nombres de los grupos: {{ ansible_facts.getent_group.keys() | list | join(', ') }}"

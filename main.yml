@@ -1,0 +1,10 @@
+---
+- name: This is a template
+  hosts: all
+  gather_facts: false
+  vars:
+    message: 'Hello World'
+  tasks:
+    - name: This is a dummy tasks
+      ansible.builtin.debug:
+        msg: '{{ message }}'

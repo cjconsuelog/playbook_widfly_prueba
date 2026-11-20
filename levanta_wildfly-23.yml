@@ -1,0 +1,41 @@
+- name: Levantar servicios {{ nombre_servicio }}
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    - name: Normalizar scripts_a_ejecutar a lista
+      ansible.builtin.set_fact:
+        lista_scripts: >-
+          {% if nombre_servicio is string %}
+            {{ nombre_servicio | replace(' ', '') | split(',') }}
+          {% else %}
+            {{ nombre_servicio }}
+          {% endif %}
+   
+    - name: Elimina directorios antes de levantar
+      ansible.builtin.file:
+        path: "/home/dockers/wildfly-23.0.0.Final/standalone/{{ item_2 }}"
+        state: absent
+      with_items:
+        - "data"
+        - "tmp"
+        - "log"
+      loop_control:
+        loop_var: item_2
+     
+
+    - name: Mostrar procesos seleccionados
+      ansible.builtin.debug:
+        var: nombre_servicio
+
+    - name: Levanta servicio {{ nombre_servicio }}
+      ansible.builtin.shell: "bash /home/dockers/wildfly-23.0.0.Final/bin/standalone.sh -b 0.0.0.0 -Djboss.socket.binding.port-offset=1000 &"
+      register: resultado
+      async: 1
+      poll: 0
+      failed_when: false
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        var: resultado

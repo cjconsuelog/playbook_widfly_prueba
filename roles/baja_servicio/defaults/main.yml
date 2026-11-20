@@ -1,0 +1,4 @@
+---
+# defaults file for test-role
+#nombre_proceso: wildfly-18
+#nombre_servicio: wildfly

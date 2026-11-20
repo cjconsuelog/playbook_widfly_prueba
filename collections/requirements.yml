@@ -1,0 +1,5 @@
+---
+collections:
+  - name: cyberark.pas
+    source: https://galaxy.ansible.com
+    version: "1.0.39"

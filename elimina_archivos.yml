@@ -1,0 +1,6 @@
+- name: Elimina Archivos
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - elimina_archivos
