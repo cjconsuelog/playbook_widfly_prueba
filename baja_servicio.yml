@@ -23,6 +23,7 @@
       ansible.builtin.set_fact:
         ansible_user: "{{ ssh_user }}"
         ansible_password: "{{ cyberark_retrieved_pass }}"
+        ansible_become_password: "{{ cyberark_retrieved_pass }}"
       no_log: true
 
   roles:
