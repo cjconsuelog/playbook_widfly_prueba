@@ -1,6 +1,29 @@
-- name: Detener servicios {{ nombre_servicio }}
+---
+- name: "Detener servicios {{ nombre_proceso | join(', ') }}"
   hosts: all
   gather_facts: false
 
+  vars_files:
+    - vars/main.yml
+
+  pre_tasks:
+    - name: Consultar password en CyberArk CCP
+      ansible.builtin.set_fact:
+        cyberark_retrieved_pass: "{{ lookup('cyberark_credential', {
+            'api_base_url': ansible_cyberark_ccp_url,
+            'app_id': ansible_cyberark_app_id,
+            'safe': safe,
+            'object': object_name,
+            'validate_certs': false
+          }) }}"
+      no_log: true
+      delegate_to: localhost
+
+    - name: Configurar credenciales de autenticacion para la sesion
+      ansible.builtin.set_fact:
+        ansible_user: "{{ ssh_user }}"
+        ansible_password: "{{ cyberark_retrieved_pass }}"
+      no_log: true
+
   roles:
-    - baja_servicio  
+    - baja_servicio
