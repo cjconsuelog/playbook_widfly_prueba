@@ -2,6 +2,7 @@
 # tasks file for test-role
 - name: Detener servicios
   ansible.builtin.command: 'pkill -9 -f "{{ item }}"'
+  become: true
   failed_when: false
   changed_when: true
   loop: "{{ nombre_proceso }}"
