@@ -1,11 +1,17 @@
 ---
 - name: Detener servicios
-  ansible.builtin.shell: 'pkill -9 -f "[{{ item[0] }}]{{ item[1:] }}"'
+  ansible.builtin.shell: >
+    set -o pipefail &&
+    PIDS=$(ps -fea | grep "[{{ item[0] }}]{{ item[1:] }}" | awk '{print $2}');
+    if [ -n "$PIDS" ]; then kill -9 $PIDS; fi
   become: true
-  register: resultado_pkill
-  failed_when: resultado_pkill.rc not in [0, 1]
-  changed_when: resultado_pkill.rc == 0
+  register: resultado_kill
+  changed_when: resultado_kill.rc == 0
   loop: "{{ nombre_proceso }}"
+
+- name: Esperar 2 segundos a que liberen recursos
+  ansible.builtin.pause:
+    seconds: 2
 
 - name: Validar estado de cada servicio
   ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "[{{ item[0] }}]{{ item[1:] }}"'
