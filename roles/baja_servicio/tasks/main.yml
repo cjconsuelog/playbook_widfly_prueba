@@ -2,7 +2,7 @@
 - name: Detener servicios
   ansible.builtin.shell: >
     set -o pipefail &&
-    PIDS=$(ps -fea | grep "[{{ item[0] }}]{{ item[1:] }}" | awk '{print $2}');
+    PIDS=$(ps -fea | grep "{{ item }}" | grep -v grep | grep -v "/bin/sh -c" | grep -v "python" | awk '{print $2}');
     if [ -n "$PIDS" ]; then kill -9 $PIDS; fi
   become: true
   register: resultado_kill
@@ -14,7 +14,7 @@
     seconds: 2
 
 - name: Validar estado de cada servicio
-  ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "[{{ item[0] }}]{{ item[1:] }}"'
+  ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "{{ item }}" | grep -v grep'
   register: estado_servicios
   failed_when: false
   changed_when: false
