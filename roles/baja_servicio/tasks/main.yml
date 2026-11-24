@@ -1,14 +1,13 @@
 ---
 - name: Detener servicios
-  ansible.builtin.shell: 'pkill -9 -f "[{{ item[0] }}]{{ item[1:] }}"'
+  ansible.builtin.command: 'pkill -9 -f "{{ item }}"'
   become: true
-  register: resultado_pkill
   failed_when: false
   changed_when: true
   loop: "{{ nombre_proceso }}"
 
 - name: Validar estado de cada servicio
-  ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "[{{ item[0] }}]{{ item[1:] }}"'
+  ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "{{ item }}" | grep -v grep'
   register: estado_servicios
   failed_when: false
   changed_when: false
