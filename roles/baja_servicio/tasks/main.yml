@@ -9,28 +9,14 @@
   loop_control:
     label: "{{ item }}"
 
-- name: 1.1 [LOG] Procesos detectados antes de detener
-  ansible.builtin.debug:
-    msg:
-      - "Servicio: {{ item.item }}"
-      - "PIDs activos: {{ item.stdout_lines | map('regex_replace', '^([0-9]+).*', '\\1') | list if item.rc == 0 else [] }}"
-  loop: "{{ estado_inicial.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-
-- name: 2. Detener servicio con sudo -S pkill pasando password de CyberArk por stdin
+- name: 2. Detener servicio ejecutando sudo pkill autorizado en sudoers
   ansible.builtin.command:
     argv:
       - sudo
-      - "-S"
-      - "-p"
-      - ""
       - pkill
       - "-9"
       - "-f"
-      - "[{{ item.item[0] }}]{{ item.item[1:] }}"
-    stdin: "{{ ansible_become_password }}\n"
-  no_log: true
+      - "{{ item.item }}"
   register: resultado_pkill
   when: item.rc == 0
   failed_when: resultado_pkill.rc not in [0, 1]
@@ -38,16 +24,6 @@
   loop: "{{ estado_inicial.results }}"
   loop_control:
     label: "{{ item.item }}"
-
-- name: 2.1 [LOG] Resultado de ejecución de sudo pkill
-  ansible.builtin.debug:
-    msg:
-      - "Servicio: {{ item.item.item }}"
-      - "Return Code: {{ item.rc | default('N/A') }}"
-      - "STDERR: {{ item.stderr | default('') }}"
-  loop: "{{ resultado_pkill.results }}"
-  loop_control:
-    label: "{{ item.item.item }}"
 
 - name: 3. Pausa breve para liberación de recursos del kernel
   ansible.builtin.pause:
