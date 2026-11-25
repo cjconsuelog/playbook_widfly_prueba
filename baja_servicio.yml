@@ -1,5 +1,4 @@
----
-- name: "Detener servicios {{ nombre_proceso | join(', ') }}"
+- name: Detener servicios {{ nombre_servicio }}
   hosts: all
   gather_facts: false
 
