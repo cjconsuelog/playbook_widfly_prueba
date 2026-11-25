@@ -1,6 +1,6 @@
 ---
 # tasks file for baja_servicio
-- name: 1. Validar estado inicial de los servicios y obtener PIDs
+- name: 1. Validar estado inicial de los servicios
   ansible.builtin.command: "pgrep -fa '{{ item }}'"
   register: estado_inicial
   failed_when: estado_inicial.rc not in [0, 1]
@@ -13,42 +13,42 @@
   ansible.builtin.debug:
     msg:
       - "Servicio: {{ item.item }}"
-      - "PIDs extraídos: {{ item.stdout_lines | map('regex_replace', '^([0-9]+).*', '\\1') | list if item.rc == 0 else [] }}"
-      - "Detalle: {{ item.stdout_lines if item.rc == 0 else ['No activo'] }}"
+      - "PIDs activos: {{ item.stdout_lines | map('regex_replace', '^([0-9]+).*', '\\1') | list if item.rc == 0 else [] }}"
   loop: "{{ estado_inicial.results }}"
   loop_control:
     label: "{{ item.item }}"
 
-- name: 2. Detener procesos activos por PID directo con sudo
+- name: 2. Detener servicio ejecutando sudo pkill directo (sin wrapper become)
   ansible.builtin.command:
-    argv: "{{ ['/usr/bin/kill', '-9'] + (item.stdout_lines | map('regex_replace', '^([0-9]+).*', '\\1') | list) }}"
-  become: true
-  become_user: root
-  register: resultado_kill
-  when:
-    - item.rc == 0
-    - (item.stdout_lines | length) > 0
-  failed_when: resultado_kill.rc != 0
-  changed_when: resultado_kill.rc == 0
+    argv:
+      - sudo
+      - pkill
+      - "-9"
+      - "-f"
+      - "[{{ item.item[0] }}]{{ item.item[1:] }}"
+  register: resultado_pkill
+  when: item.rc == 0
+  failed_when: resultado_pkill.rc not in [0, 1]
+  changed_when: resultado_pkill.rc == 0
   loop: "{{ estado_inicial.results }}"
   loop_control:
     label: "{{ item.item }}"
 
-- name: 2.1 [LOG] Resultado de ejecución de kill -9
+- name: 2.1 [LOG] Resultado de ejecución de sudo pkill
   ansible.builtin.debug:
     msg:
       - "Servicio: {{ item.item.item }}"
-      - "Comando ejecutado: {{ item.cmd | default('Omitido') }}"
       - "Return Code: {{ item.rc | default('N/A') }}"
+      - "STDOUT: {{ item.stdout | default('') }}"
       - "STDERR: {{ item.stderr | default('') }}"
-  loop: "{{ resultado_kill.results }}"
+  loop: "{{ resultado_pkill.results }}"
   loop_control:
     label: "{{ item.item.item }}"
 
 - name: 3. Pausa breve para liberación de recursos del kernel
   ansible.builtin.pause:
     seconds: 2
-  when: resultado_kill is changed
+  when: resultado_pkill is changed
 
 - name: 4. Validar estado final de cada servicio
   ansible.builtin.command: "pgrep -fa '{{ item }}'"
@@ -72,7 +72,7 @@
 
 - name: 6. Fallar el job si algún servicio continúa activo
   ansible.builtin.fail:
-    msg: "CRÍTICO: El servicio {{ item.item }} sigue activo tras enviar kill -9."
+    msg: "CRÍTICO: El servicio {{ item.item }} sigue activo tras enviar SIGKILL."
   when: item.rc == 0
   loop: "{{ estado_final.results }}"
   loop_control:
