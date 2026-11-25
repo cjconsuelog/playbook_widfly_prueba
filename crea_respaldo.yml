@@ -1,6 +1,0 @@
-- name: Crea respaldo {{ nombre_respaldo }}
-  hosts: all
-  gather_facts: false
-
-  roles:
-    - crea_respaldo 

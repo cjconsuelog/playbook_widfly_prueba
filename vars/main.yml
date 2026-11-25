@@ -2,3 +2,13 @@
 safe: "12_ROOT_APPV_172_16_12_233"
 object_name: "172.16.12.233-despccp"
 ssh_user: "despccp"
+
+
+# --- Agrega este diccionario ---
+wildfly_procesos:
+  "18":
+    nombre: "wildfly-18.0.1.Final"
+    ruta_base: "/usr/local/bridge-server-rest-liverpool/appserver/wildfly-18.0.1.Final"
+  "23":
+    nombre: "wildfly-23.0.0.Final"
+    ruta_base: "/home/dockers/wildfly-23.0.0.Final"

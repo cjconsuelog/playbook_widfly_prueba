@@ -1,10 +1,129 @@
 ---
-- name: This is a template
+- name: "Validacion de conexion CyberArk CCP y detencion de WildFly"
   hosts: all
   gather_facts: false
+
+  vars_files:
+    - vars/main.yml
+
   vars:
-    message: 'Hello World'
+    wildfly_config: "{{ wildfly_procesos[wildfly_version_seleccionada | string] | default({}) }}"
+    target_process: "{{ wildfly_config.nombre | default('') }}"
+    process_regex: "java.*{{ target_process }}"
+    estado_final: "NO_INICIADO"
+    detalle_error: "Sin errores"
+
   tasks:
-    - name: This is a dummy tasks
-      ansible.builtin.debug:
-        msg: '{{ message }}'
+    - name: Bloque principal de autenticacion CyberArk y detencion de WildFly
+      block:
+        # 1. Validar entrada del Survey antes de consultar CyberArk
+        - name: 1. Validar parametro recibido desde el Survey
+          ansible.builtin.assert:
+            that:
+              - target_process != ''
+            fail_msg: "PARAMETRO_INVALIDO: Se recibio '{{ wildfly_version_seleccionada }}'. Solo se admite '18' o '23'."
+
+        # 2. Recuperar credencial desde CyberArk CCP vía localhost
+        - name: 2. Consultar password en CyberArk CCP
+          ansible.builtin.set_fact:
+            cyberark_retrieved_pass: "{{ lookup('cyberark_credential', {
+                'api_base_url': ansible_cyberark_ccp_url,
+                'app_id': ansible_cyberark_app_id,
+                'safe': safe,
+                'object': object_name,
+                'validate_certs': false
+              }) }}"
+          no_log: true
+          delegate_to: localhost
+
+        - name: 3. Configurar credenciales de autenticacion para la sesion
+          ansible.builtin.set_fact:
+            ansible_user: "{{ ssh_user }}"
+            ansible_password: "{{ cyberark_retrieved_pass }}"
+            ansible_become_password: "{{ cyberark_retrieved_pass }}"
+          no_log: true
+
+        # 4. Probar conexion SSH y elevacion sudo usando ansible_become_password
+        - name: 4. Validar conexion SSH y privilegios sudo en el servidor
+          ansible.builtin.ping:
+          become: true
+          register: check_conexion_sudo
+
+        # 5. Validar si el proceso esta arriba (equivalente a ps -fea | grep java)
+        - name: 5. Buscar PID activo de {{ target_process }}
+          ansible.builtin.command:
+            cmd: "pgrep -af '{{ process_regex }}'"
+          register: proceso_previo
+          changed_when: false
+          failed_when: false
+
+        - name: 6. Registrar estado inicial y PIDs detectados
+          ansible.builtin.set_fact:
+            estado_final: "YA_ESTABA_ABAJO"
+            pids_iniciales: "{{ proceso_previo.stdout_lines | map('split', ' ') | map('first') | list if proceso_previo.rc == 0 else [] }}"
+
+        # 7. Matar proceso y validar que ya no exista
+        - name: 7. Ejecutar baja forzada (pkill -9) y verificar eliminacion
+          when: proceso_previo.rc == 0
+          block:
+            - name: Mostrar PIDs detectados antes de matar
+              ansible.builtin.debug:
+                msg: "Proceso {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Ejecutando pkill -9..."
+
+            - name: Ejecutar sudo pkill -9 -f {{ process_regex }}
+              ansible.builtin.command:
+                cmd: "pkill -9 -f '{{ process_regex }}'"
+              become: true
+              register: resultado_pkill
+              changed_when: resultado_pkill.rc == 0
+
+            - name: Validar en kernel que el proceso haya desaparecido
+              ansible.builtin.command:
+                cmd: "pgrep -af '{{ process_regex }}'"
+              register: proceso_posterior
+              changed_when: false
+              failed_when: false
+              until: proceso_posterior.rc != 0
+              retries: 5
+              delay: 2
+
+            - name: Confirmar muerte del proceso (KILLED)
+              ansible.builtin.assert:
+                that:
+                  - proceso_posterior.rc != 0
+                fail_msg: "PROCESO_INMORTAL: Se envio SIGKILL (-9) pero el PID {{ proceso_posterior.stdout_lines }} sigue vivo."
+
+            - name: Marcar estado como KILLED exitoso
+              ansible.builtin.set_fact:
+                estado_final: "KILLED_OK"
+
+      rescue:
+        - name: Diagnosticar causa raiz del fallo
+          ansible.builtin.set_fact:
+            estado_final: "FALLIDO"
+            detalle_error: >-
+              {%- if 'PARAMETRO_INVALIDO' in (ansible_failed_result.msg | default('')) -%}
+                Error de Survey: La version '{{ wildfly_version_seleccionada }}' no es valida (use 18 o 23).
+              {%- elif 'Consultar password en CyberArk CCP' in (ansible_failed_task.name | default('')) -%}
+                Error de CyberArk CCP: No se pudo recuperar la credencial (Safe: {{ safe | default('N/A') }}, Objeto: {{ object_name | default('N/A') }}). Revisa conectividad al CCP o permisos del AppID.
+              {%- elif 'Validar conexion SSH y privilegios sudo' in (ansible_failed_task.name | default('')) -%}
+                Error de SSH o Sudo: Fallo la autenticacion contra {{ inventory_hostname }} con el usuario '{{ ssh_user | default('N/A') }}' o la password de CyberArk no tiene permisos sudo. Detalle: {{ ansible_failed_result.msg | default('') }}
+              {%- elif 'PROCESO_INMORTAL' in (ansible_failed_result.msg | default('')) -%}
+                Proceso Bloqueado en Kernel (Estado D): {{ target_process }} no respondio a kill -9.
+              {%- else -%}
+                Fallo en tarea '{{ ansible_failed_task.name | default('Desconocida') }}': {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Error no especificado')) }}
+              {%- endif -%}
+
+        - name: Reportar error claro en consola de AAP
+          ansible.builtin.fail:
+            msg: "[ERROR EN {{ inventory_hostname }}] {{ detalle_error }}"
+
+      always:
+        - name: Resumen ejecutivo de ejecucion por servidor
+          ansible.builtin.debug:
+            msg:
+              - "Servidor: {{ inventory_hostname }}"
+              - "Servicio objetivo: {{ target_process }}"
+              - "Estado final: {{ estado_final }}"
+              - "PIDs afectados: {{ pids_iniciales | default([]) | join(', ') if (pids_iniciales | default([]) | length > 0) else 'Ninguno' }}"
+              - "Diagnostico: {{ detalle_error }}"
