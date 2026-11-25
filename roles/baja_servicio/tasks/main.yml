@@ -18,14 +18,19 @@
   loop_control:
     label: "{{ item.item }}"
 
-- name: 2. Detener servicio ejecutando sudo pkill directo (sin wrapper become)
+- name: 2. Detener servicio con sudo -S pkill pasando password de CyberArk por stdin
   ansible.builtin.command:
     argv:
       - sudo
+      - "-S"
+      - "-p"
+      - ""
       - pkill
       - "-9"
       - "-f"
       - "[{{ item.item[0] }}]{{ item.item[1:] }}"
+    stdin: "{{ ansible_become_password }}\n"
+  no_log: true
   register: resultado_pkill
   when: item.rc == 0
   failed_when: resultado_pkill.rc not in [0, 1]
@@ -39,7 +44,6 @@
     msg:
       - "Servicio: {{ item.item.item }}"
       - "Return Code: {{ item.rc | default('N/A') }}"
-      - "STDOUT: {{ item.stdout | default('') }}"
       - "STDERR: {{ item.stderr | default('') }}"
   loop: "{{ resultado_pkill.results }}"
   loop_control:
