@@ -9,43 +9,37 @@
   loop_control:
     label: "{{ item }}"
 
-- name: 1.1 [LOG] Detalle de procesos detectados antes de detener
+- name: 1.1 [LOG] Procesos detectados antes de detener
   ansible.builtin.debug:
     msg:
-      - "Servicio buscado: {{ item.item }}"
-      - "Return Code (pgrep): {{ item.rc }}"
-      - "Procesos encontrados: {{ item.stdout_lines if item.rc == 0 else ['Ninguno'] }}"
+      - "Servicio: {{ item.item }}"
+      - "PIDs extraídos: {{ item.stdout_lines | map('regex_replace', '^([0-9]+).*', '\\1') | list if item.rc == 0 else [] }}"
+      - "Detalle: {{ item.stdout_lines if item.rc == 0 else ['No activo'] }}"
   loop: "{{ estado_inicial.results }}"
   loop_control:
     label: "{{ item.item }}"
 
-- name: 2. Detener procesos activos por PID exacto con sudo
-  ansible.builtin.shell: |
-    PIDS=$(pgrep -f '{{ item.item }}')
-    if [ -n "$PIDS" ]; then
-      echo "Matando PIDs: $PIDS"
-      kill -9 $PIDS
-    else
-      echo "No se encontraron PIDs activos"
-      exit 1
-    fi
+- name: 2. Detener procesos activos por PID directo con sudo
+  ansible.builtin.command:
+    argv: "{{ ['/usr/bin/kill', '-9'] + (item.stdout_lines | map('regex_replace', '^([0-9]+).*', '\\1') | list) }}"
   become: true
   become_user: root
   register: resultado_kill
-  when: item.rc == 0
-  failed_when: resultado_kill.rc not in [0, 1]
+  when:
+    - item.rc == 0
+    - (item.stdout_lines | length) > 0
+  failed_when: resultado_kill.rc != 0
   changed_when: resultado_kill.rc == 0
   loop: "{{ estado_inicial.results }}"
   loop_control:
     label: "{{ item.item }}"
 
-- name: 2.1 [LOG] Resultado detallado de ejecución de kill -9
+- name: 2.1 [LOG] Resultado de ejecución de kill -9
   ansible.builtin.debug:
     msg:
       - "Servicio: {{ item.item.item }}"
-      - "Skipped: {{ item.skipped | default(false) }}"
-      - "Return Code (kill): {{ item.rc | default('N/A') }}"
-      - "STDOUT: {{ item.stdout | default('') }}"
+      - "Comando ejecutado: {{ item.cmd | default('Omitido') }}"
+      - "Return Code: {{ item.rc | default('N/A') }}"
       - "STDERR: {{ item.stderr | default('') }}"
   loop: "{{ resultado_kill.results }}"
   loop_control:
@@ -78,7 +72,7 @@
 
 - name: 6. Fallar el job si algún servicio continúa activo
   ansible.builtin.fail:
-    msg: "CRÍTICO: El servicio {{ item.item }} sigue activo tras enviar kill -9. Revisar logs en paso 2.1."
+    msg: "CRÍTICO: El servicio {{ item.item }} sigue activo tras enviar kill -9."
   when: item.rc == 0
   loop: "{{ estado_final.results }}"
   loop_control:
