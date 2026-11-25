@@ -1,25 +1,55 @@
 ---
-# tasks file for test-role
-- name: Detener servicios
-  ansible.builtin.command: 'pkill -9 -f "{{ item }}"'
-  failed_when: false
-  changed_when: true
-  loop: "{{ nombre_proceso }}"
-
-- name: Validar estado de cada servicio
-  ansible.builtin.shell: 'set -o pipefail && ps -fea | grep "{{ item }}" | grep -v grep'
-  register: estado_servicios
-  failed_when: false
+# tasks file for baja_servicio
+- name: 1. Validar estado inicial de los servicios
+  ansible.builtin.command: "pgrep -f '{{ item }}'"
+  register: estado_inicial
+  failed_when: estado_inicial.rc not in [0, 1]
   changed_when: false
   loop: "{{ nombre_proceso }}"
   loop_control:
     label: "{{ item }}"
 
-- name: Mostrar resultados
+- name: 2. Detener servicios activos con privilegios de root
+  ansible.builtin.command: "pkill -9 -f '{{ item.item }}'"
+  become: true
+  become_method: sudo
+  register: resultado_pkill
+  when: item.rc == 0
+  failed_when: resultado_pkill.rc not in [0, 1]
+  changed_when: resultado_pkill.rc == 0
+  loop: "{{ estado_inicial.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: 3. Pausa breve para liberación de recursos del kernel
+  ansible.builtin.pause:
+    seconds: 2
+  when: resultado_pkill is changed
+
+- name: 4. Validar estado final de cada servicio
+  ansible.builtin.command: "pgrep -f '{{ item }}'"
+  register: estado_final
+  failed_when: estado_final.rc not in [0, 1]
+  changed_when: false
+  loop: "{{ nombre_proceso }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: 5. Mostrar reporte de ejecución
   ansible.builtin.debug:
     msg: >-
       El servicio "{{ item.item }}" {{
-        'está DETENIDO ✅' if (item.stdout | trim == '') else
-        'sigue ACTIVO ❌'
+        'está DETENIDO ✅' if item.rc == 1 else
+        'sigue ACTIVO ❌ (PIDs: ' + (item.stdout_lines | join(', ')) + ')'
       }}
-  loop: "{{ estado_servicios.results }}"
+  loop: "{{ estado_final.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: 6. Fallar el job si algún servicio no logró detenerse
+  ansible.builtin.fail:
+    msg: "El servicio {{ item.item }} continúa activo después de enviar SIGKILL."
+  when: item.rc == 0
+  loop: "{{ estado_final.results }}"
+  loop_control:
+    label: "{{ item.item }}"
