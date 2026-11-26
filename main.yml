@@ -3,17 +3,16 @@
   hosts: all
   gather_facts: false
 
-  # Cargamos las variables de conexion a CyberArk y el catalogo de versiones de WildFly
+  # Cargamos credenciales de CyberArk CCP y el diccionario de versiones de WildFly
   vars_files:
     - vars/main.yml
 
   vars:
-    # Mapeamos la opcion elegida en el Survey ("18" o "23") contra nuestro catalogo
+    # Mapeamos la opcion del Survey ("18" o "23") contra el catalogo
     wildfly_config: "{{ wildfly_procesos[wildfly_version_seleccionada | string] | default({}) }}"
     target_process: "{{ wildfly_config.nombre | default('') }}"
-    # Truco [w]ildfly: evita que pkill -f se mate a si mismo al coincidir con su propio comando
-    process_regex: "java.*{{ target_process | regex_replace('^w', '[w]') }}"
-    # Variables iniciales para el reporte final al usuario
+    # Regex exclusivo para consultas de lectura con pgrep (evita falsos positivos)
+    pgrep_regex: "java.*[w]ildfly-{{ wildfly_version_seleccionada }}"
     estado_final: "NO_INICIADO"
     detalle_error: "Ejecucion completada sin errores"
 
@@ -21,7 +20,7 @@
     - name: Flujo principal de validacion y baja de servicio
       block:
         # -------------------------------------------------------------------------
-        # PASO 1: Validar que el usuario haya seleccionado una version valida en AAP
+        # PASO 1: Validar opcion recibida desde el Survey de AAP
         # -------------------------------------------------------------------------
         - name: "1. Validar version seleccionada en el Survey"
           ansible.builtin.assert:
@@ -30,7 +29,7 @@
             fail_msg: "Version invalida recibida ('{{ wildfly_version_seleccionada }}'). Solo se permite 18 o 23."
 
         # -------------------------------------------------------------------------
-        # PASO 2: Obtener credenciales dinamicas desde CyberArk CCP
+        # PASO 2: Obtener credencial dinamica desde CyberArk CCP
         # -------------------------------------------------------------------------
         - name: "2. Consultar credencial del servidor en CyberArk CCP"
           ansible.builtin.set_fact:
@@ -51,7 +50,7 @@
           no_log: true
 
         # -------------------------------------------------------------------------
-        # PASO 3: Validar acceso SSH y estado actual de ambos servicios (18 y 23)
+        # PASO 3: Validar acceso SSH y listar instancias activas (18 y 23)
         # -------------------------------------------------------------------------
         - name: "4. Validar conectividad SSH y listar instancias WildFly activas"
           ansible.builtin.command:
@@ -68,62 +67,45 @@
               - "{{ servicios_activos_inicio.stdout_lines if servicios_activos_inicio.rc == 0 else ['Ninguna instancia de WildFly esta corriendo en este momento.'] }}"
 
         # -------------------------------------------------------------------------
-        # PASO 4: Validar permisos sudo pasando la clave de forma segura por entorno
+        # PASO 4: Buscar especificamente el PID de la version elegida en el Survey
         # -------------------------------------------------------------------------
-        - name: "5. Verificar permisos sudo del usuario PAM"
-          ansible.builtin.shell:
-            cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' -l 2>&1"
-          environment:
-            PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
-          register: validacion_sudo
-          no_log: true
-          changed_when: false
-          failed_when: false
-
-        - name: "6. Confirmar que el usuario tiene autorizacion sudo"
-          ansible.builtin.assert:
-            that:
-              - validacion_sudo.rc == 0
-            fail_msg: "SUDO_RECHAZADO: El usuario '{{ ssh_user }}' conecto por SSH, pero el servidor rechazo su contrasena o permisos sudo."
-
-        # -------------------------------------------------------------------------
-        # PASO 5: Buscar especificamente el PID de la version elegida en el Survey
-        # -------------------------------------------------------------------------
-        - name: "7. Buscar proceso activo para {{ target_process }}"
+        - name: "5. Buscar proceso activo para {{ target_process }}"
           ansible.builtin.command:
-            cmd: "pgrep -af '{{ process_regex }}'"
+            cmd: "pgrep -af '{{ pgrep_regex }}'"
           register: proceso_objetivo
           changed_when: false
           failed_when: false
 
-        - name: "8. Guardar PIDs encontrados antes de detener"
+        - name: "6. Guardar PIDs encontrados antes de detener"
           ansible.builtin.set_fact:
             estado_final: "SIN_CAMBIOS_YA_ESTABA_ABAJO"
             pids_iniciales: "{{ proceso_objetivo.stdout_lines | map('split', ' ') | map('first') | list if proceso_objetivo.rc == 0 else [] }}"
 
         # -------------------------------------------------------------------------
-        # PASO 6: Si el servicio esta arriba, detenerlo y confirmar su baja
+        # PASO 5: Ejecutar el comando exacto autorizado en sudoers y confirmar baja
         # -------------------------------------------------------------------------
-        - name: "9. Detener {{ target_process }} y validar baja"
+        - name: "7. Detener {{ target_process }} y validar baja"
           when: proceso_objetivo.rc == 0
           block:
             - name: "Log: Iniciando detencion del servicio"
               ansible.builtin.debug:
-                msg: "Se detecto {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Enviando senal de detencion (pkill -9)..."
+                msg: "Se detecto {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Ejecutando comando autorizado en sudoers..."
 
-            # Sin no_log porque la password va en environment (oculta) y [w]ildfly evita que pkill se mate a si mismo
-            - name: "Ejecutar sudo pkill -9 sobre {{ target_process }}"
+            # IMPORTANTE: Se envia exactamente 'pkill -9 -f wildfly-XX.X.X.Final' tal cual esta en sudoers
+            # Si pkill devuelve RC 0 (exito) o RC 137 (mato al subshell tras matar a WildFly), la validacion posterior confirma el resultado
+            - name: "Ejecutar sudo pkill -9 -f {{ target_process }}"
               ansible.builtin.shell:
-                cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f '{{ process_regex }}'"
+                cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f {{ target_process }}"
               environment:
                 PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
               register: ejecucion_pkill
-              changed_when: ejecucion_pkill.rc == 0
+              failed_when: ejecucion_pkill.rc not in [0, 137]
+              changed_when: ejecucion_pkill.rc in [0, 137]
 
-            # Esperamos y reintentamos hasta confirmar que el proceso desaparecio del servidor
+            # Validamos con pgrep que el PID realmente haya muerto en el sistema operativo
             - name: "Validar que {{ target_process }} ya no este en ejecucion"
               ansible.builtin.command:
-                cmd: "pgrep -af '{{ process_regex }}'"
+                cmd: "pgrep -af '{{ pgrep_regex }}'"
               register: validacion_post_baja
               changed_when: false
               failed_when: false
@@ -170,10 +152,8 @@
                 Error en CyberArk CCP: No se pudo obtener la credencial (Safe: {{ safe | default('N/A') }}, Objeto: {{ object_name | default('N/A') }}). Valida permisos del AppID o disponibilidad de CCP.
               {%- elif 'Validar conectividad SSH' in (ansible_failed_task.name | default('')) -%}
                 Error de Conexion SSH: No se pudo establecer sesion con {{ inventory_hostname }} usando el usuario '{{ ssh_user }}'. Revisa conectividad de red o vigencia de la clave en PAM.
-              {%- elif 'SUDO_RECHAZADO' in (ansible_failed_result.msg | default('')) -%}
-                Error de Permisos PAM (sudo): El usuario '{{ ssh_user }}' entro por SSH pero fallo la validacion de sudo.
               {%- elif 'Ejecutar sudo pkill' in (ansible_failed_task.name | default('')) -%}
-                Error al detener servicio (RC {{ ansible_failed_result.rc | default('N/A') }}): {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('Permiso denegado')) | regex_replace('[\\r\\n]+', ' ') | trim }}.
+                Error de Permisos PAM (sudoers): El servidor rechazo el comando sudo (RC {{ ansible_failed_result.rc | default('N/A') }}). Detalle: {{ ansible_failed_result.stderr | default('Permiso denegado') | trim }}.
               {%- elif 'PROCESO_ACTIVO' in (ansible_failed_result.msg | default('')) -%}
                 El proceso {{ target_process }} no respondio a kill -9 (posible bloqueo de disco/kernel en el servidor).
               {%- else -%}
