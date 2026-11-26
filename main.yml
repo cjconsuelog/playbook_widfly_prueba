@@ -68,12 +68,13 @@
               - "{{ servicios_activos_inicio.stdout_lines if servicios_activos_inicio.rc == 0 else ['Ninguna instancia de WildFly esta corriendo en este momento.'] }}"
 
         # -------------------------------------------------------------------------
-        # PASO 4: Validar permisos sudo pasando la clave de forma segura por entorno
+        # PASO 4: Validar permisos sudo usando shell + environment (soporta simbolos)
         # -------------------------------------------------------------------------
         - name: "5. Verificar permisos sudo del usuario PAM"
-          ansible.builtin.raw: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' -l 2>&1"
+          ansible.builtin.shell:
+            cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' -l 2>&1"
           environment:
-            # Pasamos la clave como variable de entorno para evitar errores con simbolos especiales
+            # shell si soporta environment: evita errores con simbolos especiales sin exponer la clave
             PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
           register: validacion_sudo
           no_log: true
@@ -111,9 +112,10 @@
               ansible.builtin.debug:
                 msg: "Se detecto {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Enviando senal de detencion (pkill -9)..."
 
-            # Ejecutamos sudo pkill pasando la password por variable de entorno segura
+            # Ejecutamos sudo pkill con shell + environment para manejar cualquier simbolo en la clave
             - name: "Ejecutar sudo pkill -9 sobre {{ target_process }}"
-              ansible.builtin.raw: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f '{{ process_regex }}' 2>&1"
+              ansible.builtin.shell:
+                cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f '{{ process_regex }}' 2>&1"
               environment:
                 PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
               register: ejecucion_pkill
