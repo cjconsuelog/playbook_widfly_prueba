@@ -16,14 +16,14 @@
   tasks:
     - name: Bloque principal de autenticacion CyberArk y detencion de WildFly
       block:
-        # 1. Validar entrada del Survey antes de consultar CyberArk
+        # 1. Validar entrada del Survey
         - name: 1. Validar parametro recibido desde el Survey
           ansible.builtin.assert:
             that:
               - target_process != ''
             fail_msg: "PARAMETRO_INVALIDO: Se recibio '{{ wildfly_version_seleccionada }}'. Solo se admite '18' o '23'."
 
-        # 2. Recuperar credencial desde CyberArk CCP vía localhost
+        # 2. Recuperar credencial desde CyberArk CCP
         - name: 2. Consultar password en CyberArk CCP
           ansible.builtin.set_fact:
             cyberark_retrieved_pass: "{{ lookup('cyberark_credential', {
@@ -36,20 +36,55 @@
           no_log: true
           delegate_to: localhost
 
-        - name: 3. Configurar credenciales de autenticacion para la sesion
+        - name: 3. Configurar credenciales SSH (sin forzar become_password global aun)
           ansible.builtin.set_fact:
             ansible_user: "{{ ssh_user }}"
             ansible_password: "{{ cyberark_retrieved_pass }}"
-            ansible_become_password: "{{ cyberark_retrieved_pass }}"
           no_log: true
 
-        # 4. Probar conexion SSH y elevacion sudo usando ansible_become_password
-        - name: 4. Validar conexion SSH y privilegios sudo en el servidor
+        # 4A. Validar SSH puro (sin sudo)
+        - name: 4A. Validar conexion SSH base (usuario sin elevar)
           ansible.builtin.ping:
-          become: true
-          register: check_conexion_sudo
+          register: check_ssh
 
-        # 5. Validar si el proceso esta arriba (equivalente a ps -fea | grep java)
+        # 4B. Diagnosticar reglas de sudo exactas del usuario (raw evita fallo de python)
+        - name: 4B. Inspeccionar permisos sudo del usuario (sudo -n -l)
+          ansible.builtin.raw: "sudo -n -l 2>&1"
+          register: check_sudo_nopass
+          changed_when: false
+          failed_when: false
+
+        - name: 4C. Mostrar diagnostico detallado de SSH y Sudo
+          ansible.builtin.debug:
+            msg:
+              - "SSH Base: OK"
+              - "RC sudo -n -l: {{ check_sudo_nopass.rc }}"
+              - "Salida sudoers: {{ check_sudo_nopass.stdout | default('Sin salida') | trim }}"
+
+        # 4D. Si sudo -n -l fallo porque pide password, probar inyectando password por stdin
+        - name: 4D. Inspeccionar permisos sudo con password (echo pass | sudo -S -l)
+          when: check_sudo_nopass.rc != 0
+          ansible.builtin.raw: "echo '{{ cyberark_retrieved_pass }}' | sudo -S -l 2>&1"
+          register: check_sudo_withpass
+          no_log: true
+          changed_when: false
+          failed_when: false
+
+        - name: 4E. Mostrar resultado de sudo con password (si aplico)
+          when: check_sudo_nopass.rc != 0
+          ansible.builtin.debug:
+            msg:
+              - "RC sudo -S -l: {{ check_sudo_withpass.rc }}"
+              - "Salida sudo -S -l: {{ check_sudo_withpass.stdout | default('Sin salida') | regex_replace('.*password for.*:', '') | trim }}"
+
+        # Validacion dura antes de continuar: al menos uno de los dos modos sudo debe funcionar
+        - name: 4F. Verificar que el usuario tenga acceso a sudo
+          ansible.builtin.assert:
+            that:
+              - (check_sudo_nopass.rc == 0) or (check_sudo_withpass.rc | default(1) == 0)
+            fail_msg: "SUDO_DENEGADO: El usuario {{ ssh_user }} conecto por SSH pero no tiene permisos sudo validos."
+
+        # 5. Validar si el proceso esta arriba (no requiere sudo)
         - name: 5. Buscar PID activo de {{ target_process }}
           ansible.builtin.command:
             cmd: "pgrep -af '{{ process_regex }}'"
@@ -62,7 +97,7 @@
             estado_final: "YA_ESTABA_ABAJO"
             pids_iniciales: "{{ proceso_previo.stdout_lines | map('split', ' ') | map('first') | list if proceso_previo.rc == 0 else [] }}"
 
-        # 7. Matar proceso y validar que ya no exista
+        # 7. Matar proceso usando el metodo sudo que haya funcionado
         - name: 7. Ejecutar baja forzada (pkill -9) y verificar eliminacion
           when: proceso_previo.rc == 0
           block:
@@ -70,12 +105,23 @@
               ansible.builtin.debug:
                 msg: "Proceso {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Ejecutando pkill -9..."
 
-            - name: Ejecutar sudo pkill -9 -f {{ process_regex }}
-              ansible.builtin.command:
-                cmd: "pkill -9 -f '{{ process_regex }}'"
-              become: true
-              register: resultado_pkill
-              changed_when: resultado_pkill.rc == 0
+            # Usa raw con sudo directo para evitar bloqueo de platform-python en sudoers restringidos
+            - name: Ejecutar sudo pkill -9 -f {{ process_regex }} (sin password)
+              when: check_sudo_nopass.rc == 0
+              ansible.builtin.raw: "sudo -n pkill -9 -f '{{ process_regex }}' 2>&1"
+              register: resultado_pkill_nopass
+              changed_when: resultado_pkill_nopass.rc == 0
+
+            - name: Ejecutar sudo pkill -9 -f {{ process_regex }} (con password)
+              when: check_sudo_nopass.rc != 0
+              ansible.builtin.raw: "echo '{{ cyberark_retrieved_pass }}' | sudo -S pkill -9 -f '{{ process_regex }}' 2>&1"
+              register: resultado_pkill_withpass
+              no_log: true
+              changed_when: resultado_pkill_withpass.rc == 0
+
+            - name: Mostrar salida cruda de pkill
+              ansible.builtin.debug:
+                msg: "Resultado pkill -> RC: {{ (resultado_pkill_nopass.rc if check_sudo_nopass.rc == 0 else resultado_pkill_withpass.rc) }} | Output: {{ (resultado_pkill_nopass.stdout if check_sudo_nopass.rc == 0 else resultado_pkill_withpass.stdout) | default('Killed') | trim }}"
 
             - name: Validar en kernel que el proceso haya desaparecido
               ansible.builtin.command:
@@ -105,9 +151,13 @@
               {%- if 'PARAMETRO_INVALIDO' in (ansible_failed_result.msg | default('')) -%}
                 Error de Survey: La version '{{ wildfly_version_seleccionada }}' no es valida (use 18 o 23).
               {%- elif 'Consultar password en CyberArk CCP' in (ansible_failed_task.name | default('')) -%}
-                Error de CyberArk CCP: No se pudo recuperar la credencial (Safe: {{ safe | default('N/A') }}, Objeto: {{ object_name | default('N/A') }}). Revisa conectividad al CCP o permisos del AppID.
-              {%- elif 'Validar conexion SSH y privilegios sudo' in (ansible_failed_task.name | default('')) -%}
-                Error de SSH o Sudo: Fallo la autenticacion contra {{ inventory_hostname }} con el usuario '{{ ssh_user | default('N/A') }}' o la password de CyberArk no tiene permisos sudo. Detalle: {{ ansible_failed_result.msg | default('') }}
+                Error de CyberArk CCP: No se pudo recuperar la credencial (Safe: {{ safe | default('N/A') }}, Objeto: {{ object_name | default('N/A') }}).
+              {%- elif 'Validar conexion SSH base' in (ansible_failed_task.name | default('')) -%}
+                Error de Autenticacion SSH: CyberArk entrego la clave, pero {{ inventory_hostname }} rechazo el login SSH para '{{ ssh_user }}'. Detalle: {{ ansible_failed_result.msg | default('') }}
+              {%- elif 'SUDO_DENEGADO' in (ansible_failed_result.msg | default('')) -%}
+                Error de Permisos Sudo: '{{ ssh_user }}' entro por SSH, pero sudo fallo. Salida sin pass: [{{ check_sudo_nopass.stdout | default('') | trim }}] | Salida con pass: [{{ check_sudo_withpass.stdout | default('') | trim }}]
+              {%- elif 'pkill' in (ansible_failed_task.name | default('')) -%}
+                Error al ejecutar sudo pkill: RC={{ ansible_failed_result.rc | default('N/A') }}, Salida={{ ansible_failed_result.stdout | default(ansible_failed_result.msg | default('')) | trim }}
               {%- elif 'PROCESO_INMORTAL' in (ansible_failed_result.msg | default('')) -%}
                 Proceso Bloqueado en Kernel (Estado D): {{ target_process }} no respondio a kill -9.
               {%- else -%}
