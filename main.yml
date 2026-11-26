@@ -1,30 +1,38 @@
 ---
-- name: "Validacion de conexion CyberArk CCP y detencion de WildFly"
+- name: "Baja controlada de WildFly mediante CyberArk CCP"
   hosts: all
   gather_facts: false
 
+  # Cargamos las variables de conexion a CyberArk y el catalogo de versiones de WildFly
   vars_files:
     - vars/main.yml
 
   vars:
+    # Mapeamos la opcion elegida en el Survey ("18" o "23") contra nuestro catalogo
     wildfly_config: "{{ wildfly_procesos[wildfly_version_seleccionada | string] | default({}) }}"
     target_process: "{{ wildfly_config.nombre | default('') }}"
+    # Filtro estricto para asegurar que solo afectemos procesos Java de esa version exacta
     process_regex: "java.*{{ target_process }}"
+    # Variables iniciales para el reporte final al usuario
     estado_final: "NO_INICIADO"
-    detalle_error: "Sin errores"
+    detalle_error: "Ejecucion completada sin errores"
 
   tasks:
-    - name: Bloque principal de autenticacion CyberArk y detencion de WildFly
+    - name: Flujo principal de validacion y baja de servicio
       block:
-        # 1. Validar entrada del Survey
-        - name: 1. Validar parametro recibido desde el Survey
+        # -------------------------------------------------------------------------
+        # PASO 1: Validar que el usuario haya seleccionado una version valida en AAP
+        # -------------------------------------------------------------------------
+        - name: "1. Validar version seleccionada en el Survey"
           ansible.builtin.assert:
             that:
               - target_process != ''
-            fail_msg: "PARAMETRO_INVALIDO: Se recibio '{{ wildfly_version_seleccionada }}'. Solo se admite '18' o '23'."
+            fail_msg: "Version invalida recibida ('{{ wildfly_version_seleccionada }}'). Solo se permite 18 o 23."
 
-        # 2. Recuperar credencial desde CyberArk CCP
-        - name: 2. Consultar password en CyberArk CCP
+        # -------------------------------------------------------------------------
+        # PASO 2: Obtener credenciales dinamicas desde CyberArk CCP
+        # -------------------------------------------------------------------------
+        - name: "2. Consultar credencial del servidor en CyberArk CCP"
           ansible.builtin.set_fact:
             cyberark_retrieved_pass: "{{ lookup('cyberark_credential', {
                 'api_base_url': ansible_cyberark_ccp_url,
@@ -36,144 +44,157 @@
           no_log: true
           delegate_to: localhost
 
-        - name: 3. Configurar credenciales SSH (sin forzar become_password global aun)
+        - name: "3. Configurar sesion SSH con el usuario de CyberArk"
           ansible.builtin.set_fact:
             ansible_user: "{{ ssh_user }}"
             ansible_password: "{{ cyberark_retrieved_pass }}"
           no_log: true
 
-        # 4A. Validar SSH puro (sin sudo)
-        - name: 4A. Validar conexion SSH base (usuario sin elevar)
-          ansible.builtin.ping:
-          register: check_ssh
-
-        # 4B. Diagnosticar reglas de sudo exactas del usuario (raw evita fallo de python)
-        - name: 4B. Inspeccionar permisos sudo del usuario (sudo -n -l)
-          ansible.builtin.raw: "sudo -n -l 2>&1"
-          register: check_sudo_nopass
+        # -------------------------------------------------------------------------
+        # PASO 3: Validar acceso SSH y estado actual de ambos servicios (18 y 23)
+        # -------------------------------------------------------------------------
+        - name: "4. Validar conectividad SSH y listar instancias WildFly activas"
+          ansible.builtin.command:
+            cmd: "pgrep -af 'java.*wildfly'"
+          register: servicios_activos_inicio
           changed_when: false
           failed_when: false
 
-        - name: 4C. Mostrar diagnostico detallado de SSH y Sudo
+        - name: "Log: Estado inicial de servicios en el servidor"
           ansible.builtin.debug:
             msg:
-              - "SSH Base: OK"
-              - "RC sudo -n -l: {{ check_sudo_nopass.rc }}"
-              - "Salida sudoers: {{ check_sudo_nopass.stdout | default('Sin salida') | trim }}"
+              - "Conexion SSH exitosa con usuario: {{ ssh_user }}"
+              - "Instancias WildFly detectadas actualmente en el servidor:"
+              - "{{ servicios_activos_inicio.stdout_lines if servicios_activos_inicio.rc == 0 else ['Ninguna instancia de WildFly esta corriendo en este momento.'] }}"
 
-        # 4D. Si sudo -n -l fallo porque pide password, probar inyectando password por stdin
-        - name: 4D. Inspeccionar permisos sudo con password (echo pass | sudo -S -l)
-          when: check_sudo_nopass.rc != 0
-          ansible.builtin.raw: "echo '{{ cyberark_retrieved_pass }}' | sudo -S -l 2>&1"
-          register: check_sudo_withpass
+        # -------------------------------------------------------------------------
+        # PASO 4: Validar permisos sudo pasando la clave de forma segura por entorno
+        # -------------------------------------------------------------------------
+        - name: "5. Verificar permisos sudo del usuario PAM"
+          ansible.builtin.raw: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' -l 2>&1"
+          environment:
+            # Pasamos la clave como variable de entorno para evitar errores con simbolos especiales
+            PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
+          register: validacion_sudo
           no_log: true
           changed_when: false
           failed_when: false
 
-        - name: 4E. Mostrar resultado de sudo con password (si aplico)
-          when: check_sudo_nopass.rc != 0
-          ansible.builtin.debug:
-            msg:
-              - "RC sudo -S -l: {{ check_sudo_withpass.rc }}"
-              - "Salida sudo -S -l: {{ check_sudo_withpass.stdout | default('Sin salida') | regex_replace('.*password for.*:', '') | trim }}"
-
-        # Validacion dura antes de continuar: al menos uno de los dos modos sudo debe funcionar
-        - name: 4F. Verificar que el usuario tenga acceso a sudo
+        - name: "6. Confirmar que el usuario tiene autorizacion sudo"
           ansible.builtin.assert:
             that:
-              - (check_sudo_nopass.rc == 0) or (check_sudo_withpass.rc | default(1) == 0)
-            fail_msg: "SUDO_DENEGADO: El usuario {{ ssh_user }} conecto por SSH pero no tiene permisos sudo validos."
+              - validacion_sudo.rc == 0
+            fail_msg: "SUDO_RECHAZADO: El usuario '{{ ssh_user }}' conecto por SSH, pero el servidor rechazo su contrasena o permisos sudo."
 
-        # 5. Validar si el proceso esta arriba (no requiere sudo)
-        - name: 5. Buscar PID activo de {{ target_process }}
+        # -------------------------------------------------------------------------
+        # PASO 5: Buscar especificamente el PID de la version elegida en el Survey
+        # -------------------------------------------------------------------------
+        - name: "7. Buscar proceso activo para {{ target_process }}"
           ansible.builtin.command:
             cmd: "pgrep -af '{{ process_regex }}'"
-          register: proceso_previo
+          register: proceso_objetivo
           changed_when: false
           failed_when: false
 
-        - name: 6. Registrar estado inicial y PIDs detectados
+        - name: "8. Guardar PIDs encontrados antes de detener"
           ansible.builtin.set_fact:
-            estado_final: "YA_ESTABA_ABAJO"
-            pids_iniciales: "{{ proceso_previo.stdout_lines | map('split', ' ') | map('first') | list if proceso_previo.rc == 0 else [] }}"
+            estado_final: "SIN_CAMBIOS_YA_ESTABA_ABAJO"
+            pids_iniciales: "{{ proceso_objetivo.stdout_lines | map('split', ' ') | map('first') | list if proceso_objetivo.rc == 0 else [] }}"
 
-        # 7. Matar proceso usando el metodo sudo que haya funcionado
-        - name: 7. Ejecutar baja forzada (pkill -9) y verificar eliminacion
-          when: proceso_previo.rc == 0
+        # -------------------------------------------------------------------------
+        # PASO 6: Si el servicio esta arriba, detenerlo y confirmar su baja
+        # -------------------------------------------------------------------------
+        - name: "9. Detener {{ target_process }} y validar baja"
+          when: proceso_objetivo.rc == 0
           block:
-            - name: Mostrar PIDs detectados antes de matar
+            - name: "Log: Iniciando detencion del servicio"
               ansible.builtin.debug:
-                msg: "Proceso {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Ejecutando pkill -9..."
+                msg: "Se detecto {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Enviando senal de detencion (pkill -9)..."
 
-            # Usa raw con sudo directo para evitar bloqueo de platform-python en sudoers restringidos
-            - name: Ejecutar sudo pkill -9 -f {{ process_regex }} (sin password)
-              when: check_sudo_nopass.rc == 0
-              ansible.builtin.raw: "sudo -n pkill -9 -f '{{ process_regex }}' 2>&1"
-              register: resultado_pkill_nopass
-              changed_when: resultado_pkill_nopass.rc == 0
-
-            - name: Ejecutar sudo pkill -9 -f {{ process_regex }} (con password)
-              when: check_sudo_nopass.rc != 0
-              ansible.builtin.raw: "echo '{{ cyberark_retrieved_pass }}' | sudo -S pkill -9 -f '{{ process_regex }}' 2>&1"
-              register: resultado_pkill_withpass
+            # Ejecutamos sudo pkill pasando la password por variable de entorno segura
+            - name: "Ejecutar sudo pkill -9 sobre {{ target_process }}"
+              ansible.builtin.raw: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f '{{ process_regex }}' 2>&1"
+              environment:
+                PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
+              register: ejecucion_pkill
               no_log: true
-              changed_when: resultado_pkill_withpass.rc == 0
+              changed_when: ejecucion_pkill.rc == 0
 
-            - name: Mostrar salida cruda de pkill
-              ansible.builtin.debug:
-                msg: "Resultado pkill -> RC: {{ (resultado_pkill_nopass.rc if check_sudo_nopass.rc == 0 else resultado_pkill_withpass.rc) }} | Output: {{ (resultado_pkill_nopass.stdout if check_sudo_nopass.rc == 0 else resultado_pkill_withpass.stdout) | default('Killed') | trim }}"
-
-            - name: Validar en kernel que el proceso haya desaparecido
+            # Esperamos y reintentamos hasta confirmar que el proceso desaparecio del servidor
+            - name: "Validar que {{ target_process }} ya no este en ejecucion"
               ansible.builtin.command:
                 cmd: "pgrep -af '{{ process_regex }}'"
-              register: proceso_posterior
+              register: validacion_post_baja
               changed_when: false
               failed_when: false
-              until: proceso_posterior.rc != 0
+              until: validacion_post_baja.rc != 0
               retries: 5
               delay: 2
 
-            - name: Confirmar muerte del proceso (KILLED)
+            - name: "Confirmar que el proceso fue eliminado correctamente"
               ansible.builtin.assert:
                 that:
-                  - proceso_posterior.rc != 0
-                fail_msg: "PROCESO_INMORTAL: Se envio SIGKILL (-9) pero el PID {{ proceso_posterior.stdout_lines }} sigue vivo."
+                  - validacion_post_baja.rc != 0
+                fail_msg: "PROCESO_ACTIVO: Se ejecuto pkill -9, pero el PID {{ validacion_post_baja.stdout_lines }} sigue vivo en el servidor."
 
-            - name: Marcar estado como KILLED exitoso
+            # Consultamos de nuevo todas las instancias para dejar evidencia en el log
+            - name: "Consultar estado final de servicios en el servidor"
+              ansible.builtin.command:
+                cmd: "pgrep -af 'java.*wildfly'"
+              register: servicios_activos_fin
+              changed_when: false
+              failed_when: false
+
+            - name: "Log: Confirmacion de baja y servicios restantes"
+              ansible.builtin.debug:
+                msg:
+                  - "Servicio detenido exitosamente: {{ target_process }} (PIDs eliminados: {{ pids_iniciales | join(', ') }})"
+                  - "Instancias WildFly que permanecen activas en el servidor:"
+                  - "{{ servicios_activos_fin.stdout_lines if servicios_activos_fin.rc == 0 else ['Ninguna instancia de WildFly quedo activa.'] }}"
+
+            - name: "Actualizar estado final a exitoso"
               ansible.builtin.set_fact:
-                estado_final: "KILLED_OK"
+                estado_final: "DETENIDO_EXITOSAMENTE"
 
+      # ---------------------------------------------------------------------------
+      # MANEJO DE ERRORES: Traduce cualquier fallo tecnico a un mensaje claro
+      # ---------------------------------------------------------------------------
       rescue:
-        - name: Diagnosticar causa raiz del fallo
+        - name: "Identificar motivo claro del error"
           ansible.builtin.set_fact:
-            estado_final: "FALLIDO"
+            estado_final: "ERROR"
             detalle_error: >-
-              {%- if 'PARAMETRO_INVALIDO' in (ansible_failed_result.msg | default('')) -%}
-                Error de Survey: La version '{{ wildfly_version_seleccionada }}' no es valida (use 18 o 23).
-              {%- elif 'Consultar password en CyberArk CCP' in (ansible_failed_task.name | default('')) -%}
-                Error de CyberArk CCP: No se pudo recuperar la credencial (Safe: {{ safe | default('N/A') }}, Objeto: {{ object_name | default('N/A') }}).
-              {%- elif 'Validar conexion SSH base' in (ansible_failed_task.name | default('')) -%}
-                Error de Autenticacion SSH: CyberArk entrego la clave, pero {{ inventory_hostname }} rechazo el login SSH para '{{ ssh_user }}'. Detalle: {{ ansible_failed_result.msg | default('') }}
-              {%- elif 'SUDO_DENEGADO' in (ansible_failed_result.msg | default('')) -%}
-                Error de Permisos Sudo: '{{ ssh_user }}' entro por SSH, pero sudo fallo. Salida sin pass: [{{ check_sudo_nopass.stdout | default('') | trim }}] | Salida con pass: [{{ check_sudo_withpass.stdout | default('') | trim }}]
-              {%- elif 'pkill' in (ansible_failed_task.name | default('')) -%}
-                Error al ejecutar sudo pkill: RC={{ ansible_failed_result.rc | default('N/A') }}, Salida={{ ansible_failed_result.stdout | default(ansible_failed_result.msg | default('')) | trim }}
-              {%- elif 'PROCESO_INMORTAL' in (ansible_failed_result.msg | default('')) -%}
-                Proceso Bloqueado en Kernel (Estado D): {{ target_process }} no respondio a kill -9.
+              {%- if 'Version invalida' in (ansible_failed_result.msg | default('')) -%}
+                Error en Survey: La opcion '{{ wildfly_version_seleccionada }}' no es valida. Selecciona 18 o 23.
+              {%- elif 'CyberArk CCP' in (ansible_failed_task.name | default('')) -%}
+                Error en CyberArk CCP: No se pudo obtener la credencial (Safe: {{ safe | default('N/A') }}, Objeto: {{ object_name | default('N/A') }}). Valida permisos del AppID o disponibilidad de CCP.
+              {%- elif 'Validar conectividad SSH' in (ansible_failed_task.name | default('')) -%}
+                Error de Conexion SSH: No se pudo establecer sesion con {{ inventory_hostname }} usando el usuario '{{ ssh_user }}'. Revisa conectividad de red o vigencia de la clave en PAM.
+              {%- elif 'SUDO_RECHAZADO' in (ansible_failed_result.msg | default('')) -%}
+                Error de Permisos PAM (sudo): El usuario '{{ ssh_user }}' entro por SSH pero fallo la validacion de sudo ({{ validacion_sudo.stdout | default('Sin detalle') | regex_replace('[\\r\\n]+', ' ') | trim }}).
+              {%- elif 'Ejecutar sudo pkill' in (ansible_failed_task.name | default('')) -%}
+                Error al detener servicio: El usuario '{{ ssh_user }}' no tiene permiso en sudoers para ejecutar pkill (Detalle: {{ ejecucion_pkill.stdout | default('Permiso denegado') | regex_replace('[\\r\\n]+', ' ') | trim }}).
+              {%- elif 'PROCESO_ACTIVO' in (ansible_failed_result.msg | default('')) -%}
+                El proceso {{ target_process }} no respondio a kill -9 (posible bloqueo de disco/kernel en el servidor).
               {%- else -%}
-                Fallo en tarea '{{ ansible_failed_task.name | default('Desconocida') }}': {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Error no especificado')) }}
+                Fallo inesperado en el paso '{{ ansible_failed_task.name | default('Desconocido') }}': {{ ansible_failed_result.msg | default('Revisa conectividad con el nodo') }}.
               {%- endif -%}
 
-        - name: Reportar error claro en consola de AAP
+        - name: "Mostrar mensaje de error normalizado"
           ansible.builtin.fail:
-            msg: "[ERROR EN {{ inventory_hostname }}] {{ detalle_error }}"
+            msg: "[FALLO EN {{ inventory_hostname }}] {{ detalle_error }}"
 
+      # ---------------------------------------------------------------------------
+      # RESUMEN FINAL: Siempre se imprime al terminar cada servidor
+      # ---------------------------------------------------------------------------
       always:
-        - name: Resumen ejecutivo de ejecucion por servidor
+        - name: "Resumen de ejecucion"
           ansible.builtin.debug:
             msg:
+              - "=================================================="
               - "Servidor: {{ inventory_hostname }}"
-              - "Servicio objetivo: {{ target_process }}"
-              - "Estado final: {{ estado_final }}"
-              - "PIDs afectados: {{ pids_iniciales | default([]) | join(', ') if (pids_iniciales | default([]) | length > 0) else 'Ninguno' }}"
-              - "Diagnostico: {{ detalle_error }}"
+              - "Servicio solicitado: {{ target_process }}"
+              - "Resultado: {{ estado_final }}"
+              - "PIDs detenidos: {{ pids_iniciales | default([]) | join(', ') if (pids_iniciales | default([]) | length > 0) else 'Ninguno' }}"
+              - "Detalle: {{ detalle_error }}"
+              - "=================================================="
