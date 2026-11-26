@@ -11,8 +11,8 @@
     # Mapeamos la opcion elegida en el Survey ("18" o "23") contra nuestro catalogo
     wildfly_config: "{{ wildfly_procesos[wildfly_version_seleccionada | string] | default({}) }}"
     target_process: "{{ wildfly_config.nombre | default('') }}"
-    # Filtro estricto para asegurar que solo afectemos procesos Java de esa version exacta
-    process_regex: "java.*{{ target_process }}"
+    # Truco [w]ildfly: evita que pkill -f se mate a si mismo al coincidir con su propio comando
+    process_regex: "java.*{{ target_process | regex_replace('^w', '[w]') }}"
     # Variables iniciales para el reporte final al usuario
     estado_final: "NO_INICIADO"
     detalle_error: "Ejecucion completada sin errores"
@@ -55,7 +55,7 @@
         # -------------------------------------------------------------------------
         - name: "4. Validar conectividad SSH y listar instancias WildFly activas"
           ansible.builtin.command:
-            cmd: "pgrep -af 'java.*wildfly'"
+            cmd: "pgrep -af 'java.*[w]ildfly'"
           register: servicios_activos_inicio
           changed_when: false
           failed_when: false
@@ -68,13 +68,12 @@
               - "{{ servicios_activos_inicio.stdout_lines if servicios_activos_inicio.rc == 0 else ['Ninguna instancia de WildFly esta corriendo en este momento.'] }}"
 
         # -------------------------------------------------------------------------
-        # PASO 4: Validar permisos sudo usando shell + environment (soporta simbolos)
+        # PASO 4: Validar permisos sudo pasando la clave de forma segura por entorno
         # -------------------------------------------------------------------------
         - name: "5. Verificar permisos sudo del usuario PAM"
           ansible.builtin.shell:
             cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' -l 2>&1"
           environment:
-            # shell si soporta environment: evita errores con simbolos especiales sin exponer la clave
             PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
           register: validacion_sudo
           no_log: true
@@ -112,14 +111,13 @@
               ansible.builtin.debug:
                 msg: "Se detecto {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Enviando senal de detencion (pkill -9)..."
 
-            # Ejecutamos sudo pkill con shell + environment para manejar cualquier simbolo en la clave
+            # Sin no_log porque la password va en environment (oculta) y [w]ildfly evita que pkill se mate a si mismo
             - name: "Ejecutar sudo pkill -9 sobre {{ target_process }}"
               ansible.builtin.shell:
-                cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f '{{ process_regex }}' 2>&1"
+                cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f '{{ process_regex }}'"
               environment:
                 PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
               register: ejecucion_pkill
-              no_log: true
               changed_when: ejecucion_pkill.rc == 0
 
             # Esperamos y reintentamos hasta confirmar que el proceso desaparecio del servidor
@@ -142,7 +140,7 @@
             # Consultamos de nuevo todas las instancias para dejar evidencia en el log
             - name: "Consultar estado final de servicios en el servidor"
               ansible.builtin.command:
-                cmd: "pgrep -af 'java.*wildfly'"
+                cmd: "pgrep -af 'java.*[w]ildfly'"
               register: servicios_activos_fin
               changed_when: false
               failed_when: false
@@ -173,9 +171,9 @@
               {%- elif 'Validar conectividad SSH' in (ansible_failed_task.name | default('')) -%}
                 Error de Conexion SSH: No se pudo establecer sesion con {{ inventory_hostname }} usando el usuario '{{ ssh_user }}'. Revisa conectividad de red o vigencia de la clave en PAM.
               {%- elif 'SUDO_RECHAZADO' in (ansible_failed_result.msg | default('')) -%}
-                Error de Permisos PAM (sudo): El usuario '{{ ssh_user }}' entro por SSH pero fallo la validacion de sudo ({{ validacion_sudo.stdout | default('Sin detalle') | regex_replace('[\\r\\n]+', ' ') | trim }}).
+                Error de Permisos PAM (sudo): El usuario '{{ ssh_user }}' entro por SSH pero fallo la validacion de sudo.
               {%- elif 'Ejecutar sudo pkill' in (ansible_failed_task.name | default('')) -%}
-                Error al detener servicio: El usuario '{{ ssh_user }}' no tiene permiso en sudoers para ejecutar pkill (Detalle: {{ ejecucion_pkill.stdout | default('Permiso denegado') | regex_replace('[\\r\\n]+', ' ') | trim }}).
+                Error al detener servicio (RC {{ ansible_failed_result.rc | default('N/A') }}): {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('Permiso denegado')) | regex_replace('[\\r\\n]+', ' ') | trim }}.
               {%- elif 'PROCESO_ACTIVO' in (ansible_failed_result.msg | default('')) -%}
                 El proceso {{ target_process }} no respondio a kill -9 (posible bloqueo de disco/kernel en el servidor).
               {%- else -%}
