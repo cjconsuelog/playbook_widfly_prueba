@@ -91,16 +91,16 @@
               ansible.builtin.debug:
                 msg: "Se detecto {{ target_process }} activo con PID(s): {{ pids_iniciales | join(', ') }}. Ejecutando comando autorizado en sudoers..."
 
-            # IMPORTANTE: Se envia exactamente 'pkill -9 -f wildfly-XX.X.X.Final' tal cual esta en sudoers
-            # Si pkill devuelve RC 0 (exito) o RC 137 (mato al subshell tras matar a WildFly), la validacion posterior confirma el resultado
+            # Ejecutamos el comando literal autorizado en sudoers.
+            # Python devuelve rc -9 cuando pkill -9 cierra el subshell tras matar a WildFly; la validacion posterior confirma la baja.
             - name: "Ejecutar sudo pkill -9 -f {{ target_process }}"
               ansible.builtin.shell:
                 cmd: "printf '%s\\n' \"$PASS_CYBERARK\" | sudo -S -p '' pkill -9 -f {{ target_process }}"
               environment:
                 PASS_CYBERARK: "{{ cyberark_retrieved_pass }}"
               register: ejecucion_pkill
-              failed_when: ejecucion_pkill.rc not in [0, 137]
-              changed_when: ejecucion_pkill.rc in [0, 137]
+              failed_when: ejecucion_pkill.rc not in [0, -9, 137]
+              changed_when: ejecucion_pkill.rc in [0, -9, 137]
 
             # Validamos con pgrep que el PID realmente haya muerto en el sistema operativo
             - name: "Validar que {{ target_process }} ya no este en ejecucion"
